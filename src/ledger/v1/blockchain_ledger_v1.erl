@@ -277,8 +277,8 @@ new(Dir) ->
     {ok, DB, CFs} = open_db(Dir),
     %% allow config-set commit hooks in case we're worried about something being racy
     Hooks =
-        [#hook{cf = CF, predicate = Predicate, hook_inc_fun = Fun}
-         || {CF, Predicate, Fun} <- application:get_env(blockchain, commit_hook_callbacks, [])],
+        [#hook{cf = CF, predicate = Predicate, hook_inc_fun = HookIncFun, hook_end_fun = HookEndFun}
+         || {CF, Predicate, HookIncFun, HookEndFun} <- application:get_env(blockchain, commit_hook_callbacks, [])],
 
     [DefaultCF, AGwsCF, EntriesCF, DCEntriesCF, HTLCsCF, PoCsCF, SecuritiesCF, RoutingCF,
      SubnetsCF, SCsCF, H3DexCF, DelayedDefaultCF, DelayedAGwsCF, DelayedEntriesCF,
@@ -1017,6 +1017,7 @@ add_gateway(OwnerAddr, GatewayAddress, Ledger) ->
         {ok, _} ->
             {error, gateway_already_active};
         _ ->
+            io:format("*** adding gateway ~p for owner ~p", [GatewayAddress, OwnerAddr]),
             Gateway = blockchain_ledger_gateway_v2:new(OwnerAddr, undefined),
             update_gateway(Gateway, GatewayAddress, Ledger)
     end.
@@ -1914,6 +1915,7 @@ credit_account(Address, Amount, Ledger) ->
     EntriesCF = entries_cf(Ledger),
     case ?MODULE:find_entry(Address, Ledger) of
         {error, not_found} ->
+            io:format("*** address not found ~p", [Address]),
             Entry = blockchain_ledger_entry_v1:new(0, Amount),
             Bin = blockchain_ledger_entry_v1:serialize(Entry),
             cache_put(Ledger, EntriesCF, Address, Bin);
@@ -3297,6 +3299,7 @@ remove_commit_hook(Atom, #ledger_v1{commit_hooks = Hooks} = Ledger) when is_atom
     Ledger#ledger_v1{commit_hooks = Hooks1}.
 
 batch_from_cache(ETS, #ledger_v1{commit_hooks = Hooks} = Ledger) ->
+    io:format("*** hooks ~p \n", [Hooks]),
     {ok, Batch} = rocksdb:batch(),
     Filters =
         lists:foldl(
@@ -3356,6 +3359,8 @@ invoke_commit_hooks([] = _Changes, _Filters) ->
     %% if no changes then do nothing
     ok;
 invoke_commit_hooks(Changes, Filters) ->
+    io:format("*** changes ~p \n", [Changes]),
+    io:format("*** filters ~p \n", [Filters]),
     %% best effort async delivery
     FiltersMap = maps:fold(fun(CF, HookList, Acc) ->
                                    #hook{cf = CFAtom} = hd(HookList),
@@ -3363,24 +3368,30 @@ invoke_commit_hooks(Changes, Filters) ->
                           end,
                           #{},
                           Filters),
+    io:format("*** filtersmap ~p \n", [FiltersMap]),
     spawn(
       fun() ->
               %% process the changes into CF groups
               Groups = lists:foldl(
                          fun(Change, Grps) ->
+                                 io:format("*** this change ~p \n", [Change]),
                                  CF = element(1, Change),
+                                    io:format("*** change cf ~p \n", [CF]),
                                  Atom = maps:get(CF, FiltersMap),
                                  maps:update_with(Atom, fun(L) -> [Change | L] end,
                                                   [Change], Grps)
                          end,
                          #{},
                          Changes),
-
+              io:format("*** GROUPS ~p \n", [Groups]),
               %% call each incremental hook on each group
               maps:map(
                 fun(CF, HookList) ->
+                        io:format("*** HookList ~p \n", [HookList]),
                         HookAtom = maps:get(CF, FiltersMap),
+                        io:format("*** HookAtom ~p \n", [HookAtom]),
                         HookChanges = maps:get(HookAtom, Groups),
+                        io:format("*** HookChanges ~p \n", [HookChanges]),
                         lists:foreach(
                           fun(#hook{hook_inc_fun = HookFun, predicate = undefined}) ->
                                   HookFun(HookChanges);
@@ -3389,6 +3400,7 @@ invoke_commit_hooks(Changes, Filters) ->
                                       lists:filter(fun({_, _, K, V}) ->
                                                            Pred(K, V)
                                                    end, HookChanges),
+                                 io:format("*** FilteredHookChanges ~p", [FilteredHookChanges]),
                                   HookFun(FilteredHookChanges)
                           end, HookList)
                 end,
@@ -4366,51 +4378,75 @@ commit_hooks_test() ->
     BaseDir = test_utils:tmp_dir("commit_hooks_test"),
     Me = self(),
     %% check that config-set hooks work
-    %% {CF, Predicate, Fun} <- application:get_env(blockchain, commit_hook_callbacks, [])],
+    %% {CF, Predicate, HookIncFun, HookEndFun} <- application:get_env(blockchain, commit_hook_callbacks, [])],
     application:set_env(blockchain, commit_hook_callbacks,
-                        [{active_gateways, undefined, fun(Changes) -> Me ! {config, Changes} end}]),
+                        [{active_gateways,
+                            undefined,
+                            fun(Changes) -> Me ! {hook1, Changes} end,
+                            fun() -> Me ! {hook1, changes_complete} end
+                        }]),
 
     Ledger = new(BaseDir),
     Ledger1 = new_context(Ledger),
-    ok = add_gateway(<<"owner_address">>, <<"gw_address">>, Ledger1),
+    ok = add_gateway(<<"owner_address 1">>, <<"gw_address">>, Ledger1),
     ok = commit_context(Ledger1),
 
     receive
-        {config, _} -> ok
+        {hook1, _} -> ok
+    after 200 ->
+            error(hook1_timeout)
+    end,
+
+    receive
+        {hook1, changes_complete} -> ok
     after 200 ->
             error(config_set_timeout)
     end,
 
-    %% check that multiple hooks for a single CF work
-    {_Ref, Ledger2} = add_commit_hook(entries, fun(Changes) -> me ! {entries, Changes} end,
-                                      fun(K, _) -> K == <<"my_account">> end, Ledger1),
+    %% check that multiple hooks fire
+    {_Ref, Ledger2} = add_commit_hook(entries,
+                                        fun(Changes) -> Me ! {hook2, Changes} end,
+                                        fun() -> Me ! {hook2, changes_complete} end,
+                                        fun(K, _) -> K == <<"my_address">> end, Ledger1),
     Ledger3 = new_context(Ledger2),
     ok = add_gateway(<<"owner_address 2">>, <<"gw_address 2">>, Ledger3),
-    credit_account(<<"your_address">>, 4000, Ledger3),
-    credit_account(<<"my_address">>, 4000, Ledger3),
+    ok = credit_account(<<"your_address">>, 4000, Ledger3),
+    ok = credit_account(<<"my_address">>, 4000, Ledger3),
 
     ok = commit_context(Ledger3),
 
+    %% confirm we get two msgs from the 1st active gateways CF hook
     receive
-        {config, _} -> ok
+        {hook1, _} -> ok
     after 200 ->
-            error(config_set_timeout)
+            error(hook1_timeout)
     end,
 
     receive
-        {entries, Changes} ->
-            ?assertMatch([{_, put, <<"my_account">>, 4000}],
+        {hook1, changes_complete} -> ok
+    after 200 ->
+            error(hook1_timeout)
+    end,
+
+    %% confirm we get expected msgs from the 2nd hook
+    receive
+        {hook2, Changes} ->
+            ?assertMatch([{_, put, <<"my_address">>, _}],
                          Changes)
     after 200 ->
-            error(entries_timeout)
+            error(hook2_timeout)
     end,
+
+    receive
+        {hook2, changes_complete} -> ok
+    after 200 ->
+            error(hook2_timeout)
+    end,
+
 
     %% check that multiple hooks for multiple CFs work
 
     %% check that removal works
-
-
-
 
     test_utils:cleanup_tmp_dir(BaseDir).
 
