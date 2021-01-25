@@ -1017,7 +1017,6 @@ add_gateway(OwnerAddr, GatewayAddress, Ledger) ->
         {ok, _} ->
             {error, gateway_already_active};
         _ ->
-            io:format("*** adding gateway ~p for owner ~p", [GatewayAddress, OwnerAddr]),
             Gateway = blockchain_ledger_gateway_v2:new(OwnerAddr, undefined),
             update_gateway(Gateway, GatewayAddress, Ledger)
     end.
@@ -1915,7 +1914,6 @@ credit_account(Address, Amount, Ledger) ->
     EntriesCF = entries_cf(Ledger),
     case ?MODULE:find_entry(Address, Ledger) of
         {error, not_found} ->
-            io:format("*** address not found ~p", [Address]),
             Entry = blockchain_ledger_entry_v1:new(0, Amount),
             Bin = blockchain_ledger_entry_v1:serialize(Entry),
             cache_put(Ledger, EntriesCF, Address, Bin);
@@ -3299,7 +3297,6 @@ remove_commit_hook(Atom, #ledger_v1{commit_hooks = Hooks} = Ledger) when is_atom
     Ledger#ledger_v1{commit_hooks = Hooks1}.
 
 batch_from_cache(ETS, #ledger_v1{commit_hooks = Hooks} = Ledger) ->
-    io:format("*** hooks ~p \n", [Hooks]),
     {ok, Batch} = rocksdb:batch(),
     Filters =
         lists:foldl(
@@ -3359,8 +3356,6 @@ invoke_commit_hooks([] = _Changes, _Filters) ->
     %% if no changes then do nothing
     ok;
 invoke_commit_hooks(Changes, Filters) ->
-    io:format("*** changes ~p \n", [Changes]),
-    io:format("*** filters ~p \n", [Filters]),
     %% best effort async delivery
     FiltersMap = maps:fold(fun(CF, HookList, Acc) ->
                                    #hook{cf = CFAtom} = hd(HookList),
@@ -3368,30 +3363,23 @@ invoke_commit_hooks(Changes, Filters) ->
                           end,
                           #{},
                           Filters),
-    io:format("*** filtersmap ~p \n", [FiltersMap]),
     spawn(
       fun() ->
               %% process the changes into CF groups
               Groups = lists:foldl(
                          fun(Change, Grps) ->
-                                 io:format("*** this change ~p \n", [Change]),
                                  CF = element(1, Change),
-                                    io:format("*** change cf ~p \n", [CF]),
                                  Atom = maps:get(CF, FiltersMap),
                                  maps:update_with(Atom, fun(L) -> [Change | L] end,
                                                   [Change], Grps)
                          end,
                          #{},
                          Changes),
-              io:format("*** GROUPS ~p \n", [Groups]),
               %% call each incremental hook on each group
               maps:map(
                 fun(CF, HookList) ->
-                        io:format("*** HookList ~p \n", [HookList]),
                         HookAtom = maps:get(CF, FiltersMap),
-                        io:format("*** HookAtom ~p \n", [HookAtom]),
                         HookChanges = maps:get(HookAtom, Groups),
-                        io:format("*** HookChanges ~p \n", [HookChanges]),
                         lists:foreach(
                           fun(#hook{hook_inc_fun = HookFun, predicate = undefined}) ->
                                   HookFun(HookChanges);
@@ -3400,7 +3388,6 @@ invoke_commit_hooks(Changes, Filters) ->
                                       lists:filter(fun({_, _, K, V}) ->
                                                            Pred(K, V)
                                                    end, HookChanges),
-                                 io:format("*** FilteredHookChanges ~p", [FilteredHookChanges]),
                                   HookFun(FilteredHookChanges)
                           end, HookList)
                 end,
