@@ -3395,10 +3395,10 @@ invoke_commit_hooks(Changes, Filters) ->
 
                 %% call the end hook on each group now that all incremental updates are applied
               maps:map(
-                fun(_CF, HookList) ->
+                fun(CF, HookList) ->
                         lists:foreach(
                           fun(#hook{hook_end_fun = HookFun}) ->
-                                  HookFun()
+                                  HookFun(CF)
                           end, HookList)
                 end,
                 Filters)
