@@ -4370,7 +4370,7 @@ commit_hooks_test() ->
                         [{active_gateways,
                             undefined,
                             fun(Changes) -> Me ! {hook1, Changes} end,
-                            fun() -> Me ! {hook1, changes_complete} end
+                            fun(_CF) -> Me ! {hook1, changes_complete} end
                         }]),
 
     Ledger = new(BaseDir),
@@ -4393,7 +4393,7 @@ commit_hooks_test() ->
     %% check that multiple hooks fire
     {_Ref, Ledger2} = add_commit_hook(entries,
                                         fun(Changes) -> Me ! {hook2, Changes} end,
-                                        fun() -> Me ! {hook2, changes_complete} end,
+                                        fun(_CF) -> Me ! {hook2, changes_complete} end,
                                         fun(K, _) -> K == <<"my_address">> end, Ledger1),
     Ledger3 = new_context(Ledger2),
     ok = add_gateway(<<"owner_address 2">>, <<"gw_address 2">>, Ledger3),
