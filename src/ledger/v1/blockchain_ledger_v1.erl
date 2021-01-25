@@ -3396,9 +3396,10 @@ invoke_commit_hooks(Changes, Filters) ->
                 %% call the end hook on each group now that all incremental updates are applied
               maps:map(
                 fun(CF, HookList) ->
+                        CFAtom = maps:get(CF, FiltersMap),
                         lists:foreach(
                           fun(#hook{hook_end_fun = HookFun}) ->
-                                  HookFun(CF)
+                                  HookFun(CFAtom)
                           end, HookList)
                 end,
                 Filters)
